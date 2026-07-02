@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/common/types.h"
@@ -84,6 +85,9 @@ struct SequenceOutput {
 
   // the embedding of multimodal output
   std::optional<std::vector<EmbeddingOutput>> mm_embeddings;
+
+  // GE graph mode: model-agnostic output (name -> tensor)
+  std::unordered_map<std::string, torch::Tensor> graph_outputs;
 };
 
 struct RequestOutput {

@@ -25,9 +25,15 @@ Executor::Executor(CausalLM* model,
                    const ModelArgs& args,
                    const torch::Device& device,
                    const runtime::Options& options) {
-  std::string backend = (options.backend() != "vlm" && options.enable_graph())
-                            ? Device::type_str()
-                            : options.backend();
+  std::string backend = options.backend();
+#if defined(USE_TORCH_DELEGATE)
+  if (backend == "ge") {
+    // GE graph executor path, use "ge" backend directly
+  } else
+#endif
+  if (backend != "vlm" && options.enable_graph()) {
+    backend = Device::type_str();
+  }
   impl_ = ExecutorImplFactory::get_instance().create_executor_impl(
       model, args, device, options, backend);
 }

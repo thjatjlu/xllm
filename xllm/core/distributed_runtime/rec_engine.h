@@ -174,6 +174,23 @@ class RecEngine : public Engine {
     ForwardOutput get_model_output(const ForwardInput& model_inputs);
   };
 
+#if defined(USE_TORCH_DELEGATE)
+  // ============================================================
+  // GeGraphEnginePipeline: kGeGraphPipeline via local Worker
+  // torch-delegate GE graph mode: single forward() per step,
+  // graph internally handles sampling + beam search + decode.
+  // ============================================================
+  class GeGraphEnginePipeline final : public OneRecLocalEnginePipeline {
+   public:
+    explicit GeGraphEnginePipeline(RecEngine& engine);
+
+    ForwardOutput step(std::vector<Batch>& batches) override;
+
+   private:
+    ForwardOutput get_model_output(const ForwardInput& model_inputs);
+  };
+#endif
+
   // Factory method to create pipeline (can access private classes)
   static std::unique_ptr<RecEnginePipeline> create_pipeline(
       RecPipelineType type,

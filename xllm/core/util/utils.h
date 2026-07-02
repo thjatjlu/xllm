@@ -204,7 +204,7 @@ inline bool should_enable_mla(
     const std::optional<std::string>& backend = std::nullopt) {
   const std::string resolved_backend =
       backend.has_value() ? backend.value() : get_model_backend(model_path);
-  if (resolved_backend == "dit") {
+  if (resolved_backend == "dit" || resolved_backend == "ge") {
     return false;
   }
   return is_mla_model_type(get_model_type(model_path, backend));

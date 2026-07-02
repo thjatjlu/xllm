@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include "core/common/global_flags.h"
@@ -36,6 +37,7 @@ enum class RecPipelineType : uint8_t {
   kOneRecDefault = 2,             // OneRec
   kLlmRecMultiRoundPipeline = 3,  // LlmRec multi-round pipeline (device loop)
   kOneRecXAttentionPipeline = 4,  // OneRec xattention pipeline (device loop)
+  kGeGraphPipeline = 5,           // torch-delegate GE graph pipeline
 };
 
 // Check if Rec multi-round mode is enabled.
@@ -72,6 +74,10 @@ inline bool is_onerec_pipeline_type(RecPipelineType type) {
          type == RecPipelineType::kOneRecXAttentionPipeline;
 }
 
+inline bool is_ge_graph_pipeline_type(RecPipelineType type) {
+  return type == RecPipelineType::kGeGraphPipeline;
+}
+
 // Pipeline strategy selector: choose strategy based on RecModelKind
 inline RecPipelineType get_rec_pipeline_type(RecModelKind kind) {
   switch (kind) {
@@ -88,6 +94,15 @@ inline RecPipelineType get_rec_pipeline_type(RecModelKind kind) {
     default:
       return RecPipelineType::kLlmRecDefault;
   }
+}
+
+// Overload that considers backend string for GE graph mode
+inline RecPipelineType get_rec_pipeline_type(RecModelKind kind,
+                                             const std::string& backend) {
+  if (backend == "ge") {
+    return RecPipelineType::kGeGraphPipeline;
+  }
+  return get_rec_pipeline_type(kind);
 }
 
 inline constexpr bool is_onerec_model_type(std::string_view model_type) {

@@ -424,10 +424,17 @@ HFModelLoader::HFModelLoader(const std::string& model_weights_path)
       model_weights_files_.push_back(entry.path().string());
     }
   }
-  CHECK(!model_weights_files_.empty())
-      << "Failed to find model weights files in " << model_weights_path;
-  // sort the model weights files by name
-  std::sort(model_weights_files_.begin(), model_weights_files_.end());
+  // GE graph mode: no safetensors needed, weights are inside .epair archive
+  if (!model_weights_files_.empty()) {
+    // sort the model weights files by name
+    std::sort(model_weights_files_.begin(), model_weights_files_.end());
+  } else if (std::filesystem::exists(model_weights_path + "/model.epair")) {
+    LOG(INFO) << "No safetensors found but model.epair exists. "
+              << "Skipping weight file loading for GE graph mode.";
+  } else {
+    CHECK(!model_weights_files_.empty())
+        << "Failed to find model weights files in " << model_weights_path;
+  }
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/32,
@@ -748,6 +755,29 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
     return false;
   }
 
+  // GE graph mode: skip model-specific args loader, read basic fields directly
+  if (FLAGS_backend == "ge") {
+    args_.model_type(
+        reader.value<std::string>("model_type").value_or(""));
+    args_.dtype(reader.value<std::string>("dtype").value_or("float32"));
+    args_.hidden_size(reader.value<int64_t>("hidden_size").value_or(0));
+    args_.n_layers(reader.value<int64_t>("n_layers").value_or(0));
+    args_.n_heads(reader.value<int64_t>("n_heads").value_or(1));
+    args_.head_dim(reader.value<int64_t>("head_dim").value_or(0));
+    args_.vocab_size(reader.value<int64_t>("vocab_size").value_or(0));
+    args_.max_position_embeddings(
+        reader.value<int64_t>("max_position_embeddings").value_or(1));
+    args_.bos_token_id(
+        reader.value<int32_t>("bos_token_id").value_or(0));
+    args_.eos_token_id(
+        reader.value<int32_t>("eos_token_id").value_or(-1));
+    LOG(INFO) << "GE graph mode: loaded basic model args from config.json"
+              << ", model_type=" << args_.model_type()
+              << ", hidden_size=" << args_.hidden_size()
+              << ", n_layers=" << args_.n_layers();
+    return true;
+  }
+
   const std::string model_type = util::get_model_type(
       reader, std::filesystem::path(model_weights_path), FLAGS_backend);
 
@@ -991,6 +1021,13 @@ std::optional<std::string> load_chat_template_file(const std::string& dir) {
 }  // namespace
 
 bool HFModelLoader::load_tokenizer_args(const std::string& model_weights_path) {
+  // GE graph mode: use rec tokenizer (no tokenizer.model needed)
+  if (FLAGS_backend == "ge") {
+    tokenizer_args_.tokenizer_type() = "rec";
+    LOG(INFO) << "GE graph mode: using rec tokenizer (no tokenizer files needed)";
+    return true;
+  }
+
   // tokenizer args from tokenizer_config.json
   JsonReader tokenizer_reader;
   const std::string tokenizer_args_file_path =

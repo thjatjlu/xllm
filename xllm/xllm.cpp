@@ -276,7 +276,7 @@ void validate_config(const std::string& model_type) {
   }
   // TODO: support other block sizes in the future
   if (kv_cache_config.block_size() != 16 && kv_cache_config.block_size() != 1 &&
-      model_config.backend() != "dit") {
+      model_config.backend() != "dit" && model_config.backend() != "ge") {
     LOG(FATAL) << "Currently, block_size must be 16 for MLU backend, we will "
                   "support other block sizes in the future.";
   }
@@ -379,13 +379,13 @@ int run() {
   beam_search_config.enable_block_copy_kernel(false);
 #endif
   std::string model_type = "";
-  if (model_config.backend() != "dit") {
+  if (model_config.backend() != "dit" && model_config.backend() != "ge") {
     model_type = xllm::util::get_model_type(model_path, model_config.backend());
     model_config.tool_call_parser(
         function_call::FunctionCallParser::get_parser_auto(
             model_config.tool_call_parser(), model_type));
     model_config.reasoning_parser(ReasoningParser::get_parser_auto(
-        model_config.reasoning_parser(), model_type));
+            model_config.reasoning_parser(), model_type));
   }
 
   // validate config before creating master

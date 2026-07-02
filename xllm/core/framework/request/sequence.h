@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -357,6 +358,16 @@ class Sequence final {
   int32_t beam_width_cached() const { return beam_width_cached_; }
   int32_t total_rounds_cached() const { return total_rounds_cached_; }
 
+  // GE graph mode: store model-agnostic output (name -> tensor)
+  void set_graph_outputs(
+      const std::unordered_map<std::string, torch::Tensor>& outputs) {
+    graph_outputs_ = outputs;
+  }
+  bool has_graph_outputs() const { return !graph_outputs_.empty(); }
+  const std::unordered_map<std::string, torch::Tensor>& graph_outputs() const {
+    return graph_outputs_;
+  }
+
   LogprobState* logprob_state() { return logprob_state_.get(); }
   void set_estimated_latency(double estimated_latency) {
     estimated_latency_ = estimated_latency;
@@ -548,6 +559,9 @@ class Sequence final {
   int32_t total_rounds_cached_ = 0;
   std::vector<std::vector<int32_t>> beam_seq_group_flat_;
   std::vector<float> beam_last_logprobs_;
+
+  // GE graph mode: model-agnostic output (name -> tensor)
+  std::unordered_map<std::string, torch::Tensor> graph_outputs_;
 
   // Mark whether the sequence has new token updates in current decode step.
   // This is only consumed by software beam search to distinguish:

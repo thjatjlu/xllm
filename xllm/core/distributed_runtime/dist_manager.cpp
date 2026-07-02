@@ -230,7 +230,7 @@ void DistManager::setup_multi_node_workers(
       LOG(FATAL) << "Unsupported " << options.task_type()
                  << " for vlm model backend";
     }
-  } else if (model_backend == "rec") {
+  } else if (model_backend == "rec" || model_backend == "ge") {
     worker_type = WorkerType::REC;
   } else if (model_backend == "dit") {
     worker_type = WorkerType::DIT;

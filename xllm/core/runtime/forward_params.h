@@ -920,6 +920,9 @@ struct ForwardOutput {
   BeamSearchOutput beam_search_output;
   torch::Tensor beam_sequence_group;
 
+  // GE graph mode: model-agnostic output (name -> tensor)
+  std::unordered_map<std::string, torch::Tensor> graph_outputs;
+
   // dit output data
   DiTForwardOutput dit_forward_output;
 };

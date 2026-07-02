@@ -135,6 +135,18 @@ void SequencesGroup::generate_outputs(std::vector<SequenceOutput>& outputs,
     }
   }
 
+  // Check for GE graph outputs (model-agnostic name -> tensor map)
+  if (sequences_.size() == 1 && sequences_[0]->has_graph_outputs()) {
+    SequenceOutput out;
+    out.index = 0;
+    out.graph_outputs = sequences_[0]->graph_outputs();
+    if (sequences_[0]->finish_reason() != FinishReason::NONE) {
+      out.finish_reason = sequences_[0]->finish_reason().to_string();
+    }
+    outputs.push_back(std::move(out));
+    return;
+  }
+
   if (sequence_params_.streaming) {
     for (auto& seq : sequences_) {
       outputs.push_back(std::move(seq->generate_output()));

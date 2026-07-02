@@ -444,6 +444,31 @@ if(USE_NPU)
       message(FATAL_ERROR "Failed to find npu libruntime.so in ${ASCEND_TOOLKIT_HOME}/lib64")
   endif()
   set(NPU_RUNTIME_SO ${NPU_RUNTIME_SO} CACHE INTERNAL "CACHED ASCEND libruntime.so path")
+
+  option(USE_TORCH_DELEGATE "Enable torch-delegate GE graph executor" OFF)
+  if(USE_TORCH_DELEGATE)
+    add_definitions(-DUSE_TORCH_DELEGATE)
+    if(DEFINED ENV{TORCH_DELEGATE_ROOT})
+      list(APPEND CMAKE_PREFIX_PATH "$ENV{TORCH_DELEGATE_ROOT}")
+      find_package(TorchDelegate REQUIRED)
+      include_directories(SYSTEM ${TorchDelegate_INCLUDE_DIRS})
+      message(STATUS "torch-delegate enabled: ${TorchDelegate_INCLUDE_DIRS}")
+      # Explicitly link ge_runner_v2 — CMake does not propagate .so transitive
+      # deps through static libraries (.a), so we add it globally.
+      find_library(GE_RUNNER_V2_SO
+        NAMES libge_runner_v2.so
+        PATHS $ENV{ASCEND_TOOLKIT_HOME}/lib64
+        NO_DEFAULT_PATH)
+      if(GE_RUNNER_V2_SO)
+        link_libraries(${GE_RUNNER_V2_SO})
+        message(STATUS "ge_runner_v2 linked: ${GE_RUNNER_V2_SO}")
+      else()
+        message(FATAL_ERROR "libge_runner_v2.so not found in $ENV{ASCEND_TOOLKIT_HOME}/lib64")
+      endif()
+    else()
+      message(FATAL_ERROR "USE_TORCH_DELEGATE=ON requires TORCH_DELEGATE_ROOT env var")
+    endif()
+  endif()
 endif()
 
 if(USE_MLU)

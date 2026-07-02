@@ -112,6 +112,65 @@ bool send_result_to_client_brpc_rec(std::shared_ptr<CompletionCall> call,
     proto_usage->set_total_tokens(usage.num_total_tokens);
   }
 
+  // GE graph mode: if graph_outputs present, serialize each as InferOutputTensor
+  if (!req_output.outputs.empty() &&
+      !req_output.outputs[0].graph_outputs.empty()) {
+    for (const auto& [name, tensor] : req_output.outputs[0].graph_outputs) {
+      if (!tensor.defined()) {
+        continue;
+      }
+      auto* out_tensor = response.mutable_output_tensors()->Add();
+      out_tensor->set_name(name);
+      for (int64_t i = 0; i < tensor.dim(); ++i) {
+        out_tensor->mutable_shape()->Add(tensor.size(i));
+      }
+      // Flatten to 1D for serialization, then map dtype and fill contents
+      auto flat = tensor.flatten().contiguous().to(torch::kCPU);
+      if (flat.scalar_type() == torch::kInt64) {
+        out_tensor->set_datatype(proto::DataType::INT64);
+        auto* contents = out_tensor->mutable_contents();
+        auto accessor = flat.accessor<int64_t, 1>();
+        for (int64_t i = 0; i < flat.numel(); ++i) {
+          contents->mutable_int64_contents()->Add(accessor[i]);
+        }
+      } else if (flat.scalar_type() == torch::kInt32) {
+        out_tensor->set_datatype(proto::DataType::INT32);
+        auto* contents = out_tensor->mutable_contents();
+        auto accessor = flat.accessor<int32_t, 1>();
+        for (int64_t i = 0; i < flat.numel(); ++i) {
+          contents->mutable_int_contents()->Add(accessor[i]);
+        }
+      } else if (flat.scalar_type() == torch::kFloat32) {
+        out_tensor->set_datatype(proto::DataType::FLOAT);
+        auto* contents = out_tensor->mutable_contents();
+        auto accessor = flat.accessor<float, 1>();
+        for (int64_t i = 0; i < flat.numel(); ++i) {
+          contents->mutable_fp32_contents()->Add(accessor[i]);
+        }
+      } else if (flat.scalar_type() == torch::kFloat16) {
+        out_tensor->set_datatype(proto::DataType::FLOAT);
+        auto* contents = out_tensor->mutable_contents();
+        auto f32 = flat.to(torch::kFloat32);
+        auto accessor = f32.accessor<float, 1>();
+        for (int64_t i = 0; i < f32.numel(); ++i) {
+          contents->mutable_fp32_contents()->Add(accessor[i]);
+        }
+      } else if (flat.scalar_type() == torch::kBFloat16) {
+        out_tensor->set_datatype(proto::DataType::BFLOAT16);
+        auto* contents = out_tensor->mutable_contents();
+        auto f32 = flat.to(torch::kFloat32);
+        auto accessor = f32.accessor<float, 1>();
+        for (int64_t i = 0; i < f32.numel(); ++i) {
+          contents->mutable_fp32_contents()->Add(accessor[i]);
+        }
+      } else {
+        LOG(WARNING) << "Unsupported dtype for graph output tensor: "
+                     << name << ", dtype=" << flat.scalar_type();
+      }
+    }
+    return call->write_and_finish(response);
+  }
+
   // Add rec specific output tensors
   auto output_tensor = response.mutable_output_tensors()->Add();
   output_tensor->set_name("rec_result");

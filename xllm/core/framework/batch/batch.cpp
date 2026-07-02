@@ -628,6 +628,28 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
   }
 }
 
+void Batch::process_graph_outputs(const ForwardOutput& output) {
+  if (output.graph_outputs.empty()) {
+    return;
+  }
+
+  auto sequences = get_sequences();
+  if (sequences.empty()) {
+    return;
+  }
+
+  // Store the entire graph_outputs map on the first sequence.
+  // (First version: no batch-splitting, entire map goes to seq[0].)
+  sequences[0]->set_graph_outputs(output.graph_outputs);
+
+  // Mark all sequences as finished (graph completes in one shot)
+  for (auto* seq : sequences) {
+    if (seq != nullptr && !seq->finished()) {
+      seq->finish();
+    }
+  }
+}
+
 void Batch::process_sample_output(const SampleOutput& sample_output,
                                   bool replace_fake_token,
                                   bool force_requested_beam_result_size) {

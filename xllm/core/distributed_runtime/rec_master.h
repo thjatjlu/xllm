@@ -155,6 +155,23 @@ class RecMaster : public Master {
         OutputCallback callback) override;
   };
 
+#if defined(USE_TORCH_DELEGATE)
+  // GeGraphMasterPipeline - torch-delegate GE graph mode.
+  // Uses process_epair_inputs() for model-agnostic input validation.
+  class GeGraphMasterPipeline final : public RecMasterPipeline {
+   public:
+    explicit GeGraphMasterPipeline(RecMaster& master)
+        : RecMasterPipeline(master) {}
+
+    std::shared_ptr<Request> generate_request(
+        std::string prompt,
+        std::optional<std::vector<int>> prompt_tokens,
+        std::optional<std::vector<proto::InferInputTensor>> input_tensors,
+        const RequestParams& sp,
+        OutputCallback callback) override;
+  };
+#endif
+
   // Factory method to create pipeline (can access private classes)
   static std::unique_ptr<RecMasterPipeline> create_pipeline(
       RecPipelineType type,

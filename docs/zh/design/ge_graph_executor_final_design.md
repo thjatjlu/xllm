@@ -715,28 +715,155 @@ xllm/core/runtime/
 **注意**：`model_input_params.h` 等公共头文件**不引入** CANN GE 头文件，`gert::Tensor` 仅在 `ep_model.cpp` 内部使用。
 
 ### 5.3 CMake 集成
-```cmake
-# 查找 torch-delegate
-list(APPEND CMAKE_PREFIX_PATH "${TORCH_DELEGATE_ROOT}")
-find_package(TorchDelegate REQUIRED)
 
-# 链接（TorchDelegate::torch_delegate_backend 会传递依赖 graph/metadef/ge_runner_v2 等）
-target_link_libraries(xllm_core
-    TorchDelegate::torch_delegate_backend
-    torch_npu
-)
+#### 5.3.1 集成方式
+
+torch-delegate 作为**可选依赖**，仅在 `USE_NPU=ON` 且显式启用时链接：
+
+```cmake
+# 顶层 CMakeLists.txt
+option(USE_TORCH_DELEGATE "Enable torch-delegate GE graph executor" OFF)
+
+if(USE_NPU AND USE_TORCH_DELEGATE)
+  add_definitions(-DUSE_TORCH_DELEGATE)
+  
+  # 方式 A：find_package（推荐，torch-delegate 已安装）
+  if(DEFINED ENV{TORCH_DELEGATE_ROOT})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{TORCH_DELEGATE_ROOT}")
+    find_package(TorchDelegate REQUIRED)
+  else()
+    message(FATAL_ERROR "USE_TORCH_DELEGATE=ON but TORCH_DELEGATE_ROOT not set")
+  endif()
+endif()
 ```
+
+```cmake
+# xllm/CMakeLists.txt（链接阶段）
+if(USE_TORCH_DELEGATE)
+  target_link_libraries(xllm PUBLIC TorchDelegate::torch_delegate_backend)
+endif()
+```
+
+#### 5.3.2 需要关注的编译链接问题
+
+**问题 1：`_GLIBCXX_USE_CXX11_ABI` 兼容性**
+
+| 组件 | ABI 设置 | 来源 |
+|------|----------|------|
+| torch-delegate `libtorch_delegate_backend.so` | `_GLIBCXX_USE_CXX11_ABI=1` | `csrc/CMakeLists.txt:53` 硬编码 |
+| xLLM 主程序 | 取决于 libtorch 编译选项 | 通常 ABI=1（PyTorch 默认） |
+| Mooncake `ascend_transport` | `_GLIBCXX_USE_CXX11_ABI=0` | 独立编译 |
+
+**风险**：如果 xLLM 使用的 libtorch 是 ABI=0 编译的，与 torch-delegate（ABI=1）链接会导致 `std::string` / `std::list` 等 STL 类型 ABI 不兼容，运行时 crash。
+
+**验证方式**：
+```bash
+# 检查 xLLM 使用的 libtorch 的 ABI 设置
+python -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)"
+```
+
+**解决方式**：确保 torch-delegate 和 xLLM 使用相同 ABI 的 libtorch 编译。如果 xLLM 使用 ABI=0，需要重新编译 torch-delegate 并修改 `csrc/CMakeLists.txt` 中的 ABI 定义。
+
+**问题 2：`libruntime.so` 符号冲突**
+
+xLLM 自身有 `libruntime.a`（静态库），同时 CANN 也有 `libruntime.so`（动态库）。xLLM 已经通过 `find_library(NPU_RUNTIME_SO ...)` 显式查找 CANN 的 `libruntime.so` 来避免冲突（`CMakeLists.txt:437-446`）。
+
+torch-delegate 通过 `find_dependency(runtime)` 也会引入 CANN 的 `libruntime.so`。
+
+**风险**：如果 `find_dependency(runtime)` 找到的路径与 xLLM 的 `NPU_RUNTIME_SO` 不一致，可能导致符号重复或版本不匹配。
+
+**解决方式**：确保 `TORCH_DELEGATE_ROOT` 中的 `Findruntime.cmake` 模块与 xLLM 使用相同的 CANN 安装路径（`$ENV{ASCEND_TOOLKIT_HOME}`）。
+
+**问题 3：`libtorch_cpu.so` 共享依赖**
+
+torch-delegate 依赖 `libtorch_cpu`（用于 `caffe2::serialize::PyTorchStreamReader` 读取 epair 归档）。xLLM 通过 `torch_npu` 也间接依赖 libtorch。
+
+**风险**：如果 torch-delegate 和 xLLM 链接不同版本的 `libtorch_cpu.so`，会导致 ODR 违规和运行时 crash。
+
+**解决方式**：确保 torch-delegate 编译时使用的 `Torch_DIR` 与 xLLM 使用的 `PYTORCH_INSTALL_PATH` 指向同一个 PyTorch 安装。
+
+**问题 4：头文件搜索顺序**
+
+torch-delegate 的公共头文件依赖 CANN 头文件（`graph/graph.h`、`exe_graph/runtime/tensor.h`）。xLLM 已经通过 `include_directories(SYSTEM ...)` 引入了 CANN 头文件路径。
+
+**解决方式**：torch-delegate 的头文件也应以 `SYSTEM` 方式引入，避免警告：
+```cmake
+if(USE_TORCH_DELEGATE)
+  include_directories(SYSTEM ${TorchDelegate_INCLUDE_DIRS})
+endif()
+```
+
+#### 5.3.3 完整 CMake 集成代码
+
+```cmake
+# ============================================
+# 顶层 CMakeLists.txt（在 USE_NPU 块内追加）
+# ============================================
+if(USE_NPU)
+  # ... 现有 NPU 配置 ...
+
+  option(USE_TORCH_DELEGATE "Enable torch-delegate GE graph executor" OFF)
+  if(USE_TORCH_DELEGATE)
+    add_definitions(-DUSE_TORCH_DELEGATE)
+    
+    if(DEFINED ENV{TORCH_DELEGATE_ROOT})
+      list(APPEND CMAKE_PREFIX_PATH "$ENV{TORCH_DELEGATE_ROOT}")
+      find_package(TorchDelegate REQUIRED)
+      include_directories(SYSTEM ${TorchDelegate_INCLUDE_DIRS})
+      message(STATUS "torch-delegate enabled: ${TorchDelegate_INCLUDE_DIRS}")
+    else()
+      message(FATAL_ERROR "USE_TORCH_DELEGATE=ON requires TORCH_DELEGATE_ROOT env var")
+    endif()
+  endif()
+endif()
+
+# ============================================
+# xllm/CMakeLists.txt（链接阶段追加）
+# ============================================
+if(USE_TORCH_DELEGATE)
+  target_link_libraries(xllm PUBLIC TorchDelegate::torch_delegate_backend)
+endif()
+```
+
+#### 5.3.4 条件编译
+
+EpModel 相关代码通过 `#ifdef USE_TORCH_DELEGATE` 保护：
+
+```cpp
+// ep_model.h
+#ifdef USE_TORCH_DELEGATE
+
+#include "torch_delegate/epair_model_loader.h"
+
+class EpModel : public CausalLM {
+    // ...
+};
+
+#endif  // USE_TORCH_DELEGATE
+```
+
+```cpp
+// executor_impl_factory.h
+#ifdef USE_TORCH_DELEGATE
+#include "ge_graph_executor_impl.h"
+REGISTER_EXECUTOR("ge", GeGraphExecutorImpl);
+#endif
+```
+
+这样不启用 `USE_TORCH_DELEGATE` 时，所有 GE Graph 代码被完全跳过，不影响现有构建。
 
 ## 6. 实现计划
 
 ### Phase 1：基础设施 + EpModel
-1. CMake 集成 `torch-delegate`（`find_package(TorchDelegate)`）
-2. 实现 `ge_tensor_utils.h`（`TorchToGe` / `GeToTorch` / dtype 映射）
-3. 实现 `EpModel`（继承 `CausalLM`）
+1. CMake 集成 `torch-delegate`（`USE_TORCH_DELEGATE` 选项 + `find_package`）
+2. 验证 ABI 兼容性（`_GLIBCXX_USE_CXX11_ABI` 一致）
+3. 验证 `libruntime.so` / `libtorch_cpu.so` 无符号冲突
+4. 实现 `ge_tensor_utils.h`（`TorchToGe` / `GeToTorch` / dtype 映射）
+5. 实现 `EpModel`（继承 `CausalLM`，`#ifdef USE_TORCH_DELEGATE` 保护）
    - `load_model()`：GE 初始化 → 构造 `EpairModelLoader` → `CompileAndLoad` → `ParseGraphIO`
    - `forward()`：`BuildGraphInputs` → `RunModelWithStreamAsync` → `ConvertOutputs`
    - `BuildGraphInputs()`：按 `input_names_` 从函数参数 + MMData 取数据
-4. 单元测试：EpModel load + forward PoC
+6. 单元测试：EpModel load + forward PoC
 
 ### Phase 2：Executor + Worker/Engine Pipeline
 1. 实现 `GeGraphExecutorImpl`（`REGISTER_EXECUTOR("ge", ...)`）
@@ -841,7 +968,9 @@ if (options.backend() == "ge" && options.enable_graph()) {
 | ModelInputParams 结构 | `git diff` 检查 | 无改动 |
 | 现有 Pipeline 逻辑 | `git diff` 检查 | 无改动（仅新增 `kGeGraphPipeline` 枚举） |
 | 现有 Executor 注册 | 运行现有测试 | 全部通过 |
-| CMake 构建 | 不配置 `TORCH_DELEGATE_ROOT` | 构建成功（GE 路径条件编译跳过） |
+| CMake 构建 | 不配置 `USE_TORCH_DELEGATE=ON` | 构建成功（GE 路径条件编译跳过） |
+| ABI 兼容性 | `_GLIBCXX_USE_CXX11_ABI` 一致 | torch-delegate 与 xLLM 使用相同 ABI 的 libtorch |
+| 符号冲突 | `ldd` 检查 `libruntime.so` / `libtorch_cpu.so` | 无重复符号，共享同一 CANN/PyTorch 安装 |
 | 运行时选择 | 配置 `backend="rec"` | 走现有 ATB 路径，行为不变 |
 
 ### 9.5 回退策略

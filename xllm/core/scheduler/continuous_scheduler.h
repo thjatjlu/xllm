@@ -80,6 +80,9 @@ class ContinuousScheduler : public Scheduler {
 
     PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
 
+    // backend type (e.g., "rec", "ge"), used by scheduler pipeline selection
+    PROPERTY(std::string, backend);
+
     // In general decode instance send a batch responses to prefill in disagg pd
     // mode. here, we add a flag to control whether send a batch or single
     // response once, This will help us to debug code. default value is false.

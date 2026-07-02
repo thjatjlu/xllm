@@ -119,6 +119,11 @@ class Batch {
 
   void process_beam_sequence_group(const RawForwardOutput& raw_output);
   void process_beam_sequence_group(const ForwardOutput& output);
+
+  // Process GE graph outputs: store name->tensor map on the first sequence.
+  // All sequences are marked as finished (graph completes in one shot).
+  void process_graph_outputs(const ForwardOutput& output);
+
   // mark all sequences as finished (used by rec model multi-round decoding)
   void finish();
 
