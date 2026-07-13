@@ -633,7 +633,7 @@ RecMaster::RecMaster(const Options& options)
   model_args_ = engine_->model_args();
   rec_type_ = get_rec_type(model_args_);
   if (options_.backend() == "ge") {
-    rec_type_ = RecType::kOneRec;
+    rec_type_ = RecType::kGeGraph;
   }
   if (rec_type_ == RecType::kNone) {
     LOG(ERROR) << "Unsupported rec model_type: " << model_args_.model_type();
@@ -732,8 +732,9 @@ void RecMaster::handle_request(
     std::optional<std::vector<proto::InferInputTensor>> input_tensors,
     RequestParams sp,
     OutputCallback callback) {
-  // This interface supports both OneRec and LlmRec (qwen3 without mm_data)
-  if (rec_type_ != RecType::kOneRec && rec_type_ != RecType::kLlmRec) {
+  // This interface supports OneRec, LlmRec, and GE graph mode
+  if (rec_type_ != RecType::kOneRec && rec_type_ != RecType::kLlmRec &&
+      rec_type_ != RecType::kGeGraph) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Unsupported rec type for this interface");
     return;

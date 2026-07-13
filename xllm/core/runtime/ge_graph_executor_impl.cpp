@@ -27,9 +27,9 @@ limitations under the License.
 namespace xllm {
 
 GeGraphExecutorImpl::GeGraphExecutorImpl(CausalLM* model,
-                                         const ModelArgs& args,
-                                         const torch::Device& device,
-                                         const runtime::Options& options)
+                                          const ModelArgs& args,
+                                          const torch::Device& device,
+                                          const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
   if (model_ == nullptr) {
     LOG(ERROR) << "GeGraphExecutorImpl requires non-null model";
@@ -43,11 +43,8 @@ GeGraphExecutorImpl::GeGraphExecutorImpl(CausalLM* model,
     return;
   }
 
-  if (!ep_model->is_initialized()) {
-    LOG(ERROR) << "EpModel is not initialized";
-    return;
-  }
-
+  // Note: EpModel::load_model() may not have been called yet at construction
+  // time. We defer the initialized_ check to run().
   device_id_ = static_cast<uint64_t>(device.index());
   initialized_ = true;
 }
@@ -61,11 +58,16 @@ ForwardInput GeGraphExecutorImpl::prepare_inputs(Batch& batch) {
 }
 
 ModelOutput GeGraphExecutorImpl::run(const torch::Tensor& tokens,
-                                     const torch::Tensor& positions,
-                                     std::vector<KVCache>& kv_caches,
-                                     const ModelInputParams& params) {
+                                      const torch::Tensor& positions,
+                                      std::vector<KVCache>& kv_caches,
+                                      const ModelInputParams& params) {
   if (!initialized_) {
     LOG(ERROR) << "GeGraphExecutorImpl not initialized";
+    return ModelOutput();
+  }
+  auto* ep_model = dynamic_cast<EpModel*>(model_);
+  if (ep_model == nullptr || !ep_model->is_initialized()) {
+    LOG(ERROR) << "EpModel not initialized at run time";
     return ModelOutput();
   }
   COUNTER_INC(num_model_execution_total_eager);

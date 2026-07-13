@@ -13,6 +13,7 @@ cc_library(
     onerec_batch_input_builder.h
     onerec_xattention_batch_input_builder.h
     rec_multi_round_batch_input_builder.h
+    ge_graph_batch_input_builder.h
   SRCS
     dit_batch.cpp
     batch.cpp
@@ -22,6 +23,7 @@ cc_library(
     onerec_batch_input_builder.cpp
     onerec_xattention_batch_input_builder.cpp
     rec_multi_round_batch_input_builder.cpp
+    ge_graph_batch_input_builder.cpp
     beam_search.h
   DEPS
     :request

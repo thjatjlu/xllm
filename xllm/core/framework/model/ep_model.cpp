@@ -29,7 +29,9 @@ limitations under the License.
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <string>
 
+#include "absl/strings/str_join.h"
 #include "torch_delegate/epair_model_loader.h"
 #include "torch_delegate/td_types.h"
 
@@ -92,6 +94,30 @@ torch::ScalarType ge_dtype_to_torch(ge::DataType dtype) {
       LOG(FATAL) << "Unsupported GE dtype for torch conversion: "
                  << static_cast<uint32_t>(dtype);
       return torch::kFloat32;
+  }
+}
+
+size_t ge_dtype_size(ge::DataType dtype) {
+  switch (dtype) {
+    case ge::DT_FLOAT:
+    case ge::DT_INT32:
+    case ge::DT_UINT32:
+      return 4;
+    case ge::DT_FLOAT16:
+    case ge::DT_BF16:
+    case ge::DT_INT16:
+    case ge::DT_UINT16:
+      return 2;
+    case ge::DT_INT64:
+    case ge::DT_UINT64:
+    case ge::DT_DOUBLE:
+      return 8;
+    case ge::DT_BOOL:
+    case ge::DT_INT8:
+    case ge::DT_UINT8:
+      return 1;
+    default:
+      return 4;
   }
 }
 
@@ -282,6 +308,19 @@ void EpModel::parse_graph_io() {
         ge::AscendString name;
         src_node->GetName(name);
         output_names_.push_back(name.GetString());
+
+        ge::TensorDesc tensor_desc;
+        auto ret = src_node->GetOutputDesc(src_port, tensor_desc);
+        if (ret == ge::GRAPH_SUCCESS) {
+          output_shapes_.push_back(tensor_desc.GetShape().GetDims());
+          output_dtypes_.push_back(
+              static_cast<int>(tensor_desc.GetDataType()));
+        } else {
+          LOG(WARNING) << "Failed to get output desc for index " << i
+                       << ", using defaults";
+          output_shapes_.push_back({});
+          output_dtypes_.push_back(static_cast<int>(ge::DT_FLOAT));
+        }
       }
     }
   }
@@ -289,6 +328,14 @@ void EpModel::parse_graph_io() {
   input_names_.reserve(indexed_inputs.size());
   for (auto& [idx, name] : indexed_inputs) {
     input_names_.push_back(std::move(name));
+  }
+
+  VLOG(1) << "EpModel output info:";
+  for (size_t i = 0; i < output_names_.size(); ++i) {
+    VLOG(1) << "  [" << i << "] name=" << output_names_[i]
+            << ", dtype=" << output_dtypes_[i]
+            << ", shape=["
+            << absl::StrJoin(output_shapes_[i], ",") << "]";
   }
 }
 
@@ -347,8 +394,61 @@ ModelOutput EpModel::forward(const torch::Tensor& tokens,
   aclrtStream stream =
       c10_npu::getCurrentNPUStream(static_cast<int32_t>(device_id_)).stream();
 
+  // Output buffer preparation:
+  // - Static shape: pre-allocate device memory for better performance.
+  // - Dynamic shape: leave gert::Tensor data unset; GE will allocate
+  //   internally during execution.
   std::vector<gert::Tensor> device_outputs;
   device_outputs.resize(output_names_.size());
+  std::vector<void*> output_dev_ptrs;
+  output_dev_ptrs.reserve(device_outputs.size());
+
+  for (size_t i = 0; i < device_outputs.size() && i < output_names_.size();
+       ++i) {
+    auto ge_dtype = static_cast<ge::DataType>(output_dtypes_[i]);
+    const auto& dims = output_shapes_[i];
+
+    bool is_static = true;
+    int64_t num_elements = 1;
+    for (const auto& dim : dims) {
+      if (dim < 0) {
+        is_static = false;
+        break;
+      }
+      num_elements *= dim;
+    }
+
+    if (is_static) {
+      gert::StorageShape shape;
+      for (const auto& dim : dims) {
+        shape.MutableOriginShape().AppendDim(dim);
+        shape.MutableStorageShape().AppendDim(dim);
+      }
+      device_outputs[i].GetShape() = shape;
+      device_outputs[i].MutableFormat() =
+          gert::StorageFormat(ge::FORMAT_ND, ge::FORMAT_ND, {});
+      device_outputs[i].SetDataType(ge_dtype);
+
+      size_t bytes =
+          static_cast<size_t>(num_elements) * ge_dtype_size(ge_dtype);
+      void* dev_ptr = nullptr;
+      if (bytes > 0) {
+        auto acl_ret =
+            aclrtMalloc(&dev_ptr, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+        CHECK(acl_ret == ACL_SUCCESS)
+            << "aclrtMalloc failed for output " << i << ", size=" << bytes;
+      }
+      output_dev_ptrs.push_back(dev_ptr);
+      device_outputs[i].SetData(gert::TensorData(dev_ptr, nullptr, bytes,
+                                                 gert::kOnDeviceHbm));
+      VLOG(1) << "Output [" << i << "] \"" << output_names_[i]
+              << "\" static pre-alloc: bytes=" << bytes;
+    } else {
+      output_dev_ptrs.push_back(nullptr);
+      VLOG(1) << "Output [" << i << "] \"" << output_names_[i]
+              << "\" dynamic shape, deferred to GE runtime";
+    }
+  }
 
   auto run_status = impl_->loader->RunModelWithStreamAsync(
       stream, graph_inputs, device_outputs);
@@ -359,24 +459,91 @@ ModelOutput EpModel::forward(const torch::Tensor& tokens,
         aclrtFree(ptr);
       }
     }
+    for (auto* ptr : output_dev_ptrs) {
+      if (ptr) {
+        aclrtFree(ptr);
+      }
+    }
     return ModelOutput();
   }
 
   aclrtSynchronizeStream(stream);
 
   ModelOutput result;
-  std::vector<void*> output_dev_ptrs;
-  output_dev_ptrs.reserve(device_outputs.size());
 
   for (size_t i = 0; i < device_outputs.size() && i < output_names_.size(); ++i) {
-    const void* addr = device_outputs[i].GetAddr();
-    if (addr) {
-      output_dev_ptrs.push_back(const_cast<void*>(addr));
+    // For dynamic outputs, GE allocated device memory internally.
+    // Collect the address so we can free it after D2H copy.
+    if (output_dev_ptrs[i] == nullptr) {
+      output_dev_ptrs[i] = const_cast<void*>(device_outputs[i].GetAddr());
     }
+
+    const void* src_addr = device_outputs[i].GetAddr();
+    if (src_addr == nullptr) {
+      LOG(WARNING) << "Output [" << i << "] \"" << output_names_[i]
+                   << "\" has null device address after execution";
+      continue;
+    }
+
+    auto ge_dtype = static_cast<ge::DataType>(output_dtypes_[i]);
+    const auto& dims = output_shapes_[i];
+
+    size_t bytes = device_outputs[i].GetSize();
+    if (bytes == 0) {
+      int64_t num_elements = 1;
+      for (const auto& dim : dims) {
+        if (dim > 0) {
+          num_elements *= dim;
+        }
+      }
+      bytes = static_cast<size_t>(num_elements) * ge_dtype_size(ge_dtype);
+    }
+
+    LOG(INFO) << "Output [" << i << "] \"" << output_names_[i]
+              << "\" src_addr=" << src_addr
+              << ", ge_bytes=" << device_outputs[i].GetSize()
+              << ", computed_bytes=" << bytes
+              << ", dims=[" << absl::StrJoin(dims, ",") << "]"
+              << ", ge_dtype=" << static_cast<int>(ge_dtype);
+
+    auto torch_dtype = ge_dtype_to_torch(ge_dtype);
+
+    // Create output tensor on CPU and do D2H copy (synchronous).
+    // Avoids stream ordering issues between torch NPU allocator and
+    // aclrtMemcpy D2D async submission.
     torch::Tensor torch_output =
-        ge_to_torch(device_outputs[i], options_.device());
+        torch::empty(dims, torch::TensorOptions()
+                               .device(torch::kCPU)
+                               .dtype(torch_dtype));
+
+    LOG(INFO) << "torch_output(CPU): data_ptr=" << torch_output.data_ptr()
+              << ", nbytes=" << torch_output.nbytes();
+
+    if (bytes > 0 && torch_output.data_ptr() != nullptr) {
+      auto acl_ret = aclrtMemcpy(torch_output.data_ptr(), bytes, src_addr,
+                                 bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+      LOG(INFO) << "aclrtMemcpy D2H result=" << acl_ret
+                << ", dst=" << torch_output.data_ptr()
+                << ", src=" << src_addr
+                << ", bytes=" << bytes;
+      CHECK(acl_ret == ACL_SUCCESS)
+          << "aclrtMemcpy D2H failed for output " << i
+          << ", bytes=" << bytes;
+    } else {
+      LOG(WARNING) << "Output [" << i << "] \"" << output_names_[i]
+                   << "\" empty output or null torch data_ptr, bytes=" << bytes;
+    }
+
+    VLOG(1) << "Output [" << i << "] \"" << output_names_[i]
+            << "\" D2H copied: bytes=" << bytes
+            << ", dims=[" << absl::StrJoin(dims, ",") << "]";
+
     result.graph_outputs[output_names_[i]] = std::move(torch_output);
   }
+
+  // Synchronize before freeing device memory: aclrtMemcpy D2D may be
+  // asynchronously submitted to the stream.
+  aclrtSynchronizeStream(stream);
 
   if (!result.graph_outputs.empty()) {
     auto it = result.graph_outputs.begin();

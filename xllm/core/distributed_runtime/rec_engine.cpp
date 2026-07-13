@@ -1220,6 +1220,10 @@ RecEngine::RecMultiRoundEnginePipeline::get_active_activation_memory() const {
 RecEngine::GeGraphEnginePipeline::GeGraphEnginePipeline(RecEngine& engine)
     : OneRecLocalEnginePipeline(engine) {}
 
+int64_t RecEngine::GeGraphEnginePipeline::minimal_kv_cache_blocks() const {
+  return 1;
+}
+
 ForwardOutput RecEngine::GeGraphEnginePipeline::step(
     std::vector<Batch>& batches) {
   if (engine_.workers_.empty()) {

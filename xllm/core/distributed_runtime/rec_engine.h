@@ -184,6 +184,7 @@ class RecEngine : public Engine {
    public:
     explicit GeGraphEnginePipeline(RecEngine& engine);
 
+    int64_t minimal_kv_cache_blocks() const override;
     ForwardOutput step(std::vector<Batch>& batches) override;
 
    private:

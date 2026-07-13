@@ -21,6 +21,7 @@ limitations under the License.
 #include <memory>
 
 #include "core/util/rec_model_utils.h"
+#include "ge_graph_batch_input_builder.h"
 #include "onerec_batch_input_builder.h"
 #include "onerec_xattention_batch_input_builder.h"
 #include "rec_multi_round_batch_input_builder.h"
@@ -78,6 +79,17 @@ std::unique_ptr<RecBatchInputBuilder> RecBatchInputBuilder::create(
       }
       // Fall through for non-multi-round LlmRec (not yet implemented)
       break;
+    case RecType::kGeGraph:
+      return std::make_unique<GeGraphBatchInputBuilder>(
+          sequence_groups,
+          allowed_max_tokens,
+          input_embeddings_vec,
+          mm_data_vec,
+          swap_block_transfer_infos,
+          batch_id,
+          args,
+          batch_forward_type,
+          thread_pool);
     case RecType::kNone:
       break;
   }

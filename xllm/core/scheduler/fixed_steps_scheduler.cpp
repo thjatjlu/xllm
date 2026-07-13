@@ -85,9 +85,10 @@ void FixedStepsScheduler::handle_prefill_requests(
       scheduler_pipeline_ && scheduler_pipeline_->requires_kv_cache();
   while (!waiting_priority_queue_->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 &&
-         kv_cache_manager_->kv_cache_utilization() <
-             ::xllm::SchedulerConfig::get_instance()
-                 .prefill_scheduling_memory_usage_threshold()) {
+         (!requires_kv_cache ||
+          kv_cache_manager_->kv_cache_utilization() <
+              ::xllm::SchedulerConfig::get_instance()
+                  .prefill_scheduling_memory_usage_threshold())) {
     std::shared_ptr<Request> request(waiting_priority_queue_->top());
     if (request->finished() || request->cancelled()) {
       if (requires_kv_cache) {
@@ -511,21 +512,6 @@ FixedStepsScheduler::GeGraphSchedulerPipeline::create_batches(
       scheduler.running_sequences_,
       scheduler.running_sequences_budgets_,
       scheduler.kv_cache_manager_->get_swap_block_transfer_infos());
-}
-
-bool FixedStepsScheduler::GeGraphSchedulerPipeline::allocate_kv_cache(
-    KVCacheManager* kv_cache_manager,
-    Sequence* sequence) {
-  const size_t num_tokens = sequence->num_tokens();
-  size_t max_generated_tokens = 512;
-  if (const auto* stopping_checker = sequence->stopping_checker()) {
-    max_generated_tokens = stopping_checker->get_max_generated_tokens();
-  }
-  const size_t total_tokens = num_tokens + max_generated_tokens;
-  if (total_tokens < num_tokens) {
-    return false;
-  }
-  return kv_cache_manager->allocate(sequence, total_tokens);
 }
 #endif  // USE_TORCH_DELEGATE
 

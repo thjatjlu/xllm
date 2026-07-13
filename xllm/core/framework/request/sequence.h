@@ -402,6 +402,9 @@ class Sequence final {
   bool is_onerec_model() const {
     return sequence_params_.rec_type == RecType::kOneRec;
   }
+  bool is_ge_graph_model() const {
+    return sequence_params_.rec_type == RecType::kGeGraph;
+  }
 
   static const std::string ENCODER_SPARSE_EMBEDDING_NAME;
   static const std::string DECODER_CONTEXT_EMBEDDING_NAME;

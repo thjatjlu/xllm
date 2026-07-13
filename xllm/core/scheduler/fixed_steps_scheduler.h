@@ -116,9 +116,11 @@ class FixedStepsScheduler final : public ContinuousScheduler {
    public:
     std::vector<Batch> create_batches(FixedStepsScheduler& scheduler,
                                       BatchFactory* batch_factory) override;
-    bool requires_kv_cache() const override { return true; }
-    bool allocate_kv_cache(KVCacheManager* kv_cache_manager,
-                           Sequence* sequence) override;
+    bool requires_kv_cache() const override { return false; }
+    bool allocate_kv_cache(KVCacheManager* /*kv_cache_manager*/,
+                           Sequence* /*sequence*/) override {
+      return true;
+    }
   };
 #endif
 

@@ -68,6 +68,8 @@ class EpModel final : public CausalLM {
   // Populated by parse_graph_io() during load_model().
   std::vector<std::string> input_names_;
   std::vector<std::string> output_names_;
+  std::vector<std::vector<int64_t>> output_shapes_;
+  std::vector<int> output_dtypes_;  // ge::DataType as int to avoid header leak
 };
 
 }  // namespace xllm
