@@ -236,6 +236,16 @@ Sequence::Sequence(size_t index,
       decoder_(std::move(decoder)),
       termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)),
       request_id_(seq_params.request_id) {
+  if (is_ge_graph_model()) {
+    num_prompt_tokens_ = 1;
+    volatile_num_prompt_tokens_ = 1;
+    tokens_.resize(2);
+    tokens_[0] = seq_params.bos_token_id;
+    num_tokens_ = 1;
+    cur_generated_token_idx_ = 1;
+    return;
+  }
+
   if (is_onerec_model()) {
     init_onerec_sequence(prompt_token_ids, std::move(input_embedding));
     return;

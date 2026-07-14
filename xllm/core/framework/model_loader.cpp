@@ -43,6 +43,14 @@ std::unique_ptr<ModelLoader> ModelLoader::create(
 
   if (model_type == ModelType::HF_MODEL_TYPE) {
     return std::make_unique<HFModelLoader>(model_weights_path);
+  } else if (std::filesystem::exists(
+                 model_weights_path + "/model.epair")) {
+    // Epair model directory: has config.json + model.epair but no weight files.
+    // HFModelLoader reads config.json for ModelArgs; empty state dicts are OK
+    // because EpModel loads weights from the .epair archive, not safetensors.
+    LOG(INFO) << "No safetensors/bin found, but model.epair exists. "
+              << "Creating loader for GE graph mode.";
+    return std::make_unique<HFModelLoader>(model_weights_path);
   } else {
     LOG(FATAL) << "Only support HF model type currently.";
   }

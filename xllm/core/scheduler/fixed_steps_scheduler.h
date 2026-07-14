@@ -110,10 +110,25 @@ class FixedStepsScheduler final : public ContinuousScheduler {
     }
   };
 
+#if defined(USE_TORCH_DELEGATE)
+  // GE Graph pipeline: KV cache managed by graph (in-place update)
+  class GeGraphSchedulerPipeline final : public SchedulerPipeline {
+   public:
+    std::vector<Batch> create_batches(FixedStepsScheduler& scheduler,
+                                      BatchFactory* batch_factory) override;
+    bool requires_kv_cache() const override { return false; }
+    bool allocate_kv_cache(KVCacheManager* /*kv_cache_manager*/,
+                           Sequence* /*sequence*/) override {
+      return true;
+    }
+  };
+#endif
+
   // Factory method to create scheduler pipeline
   static std::unique_ptr<SchedulerPipeline> create_scheduler_pipeline(
       RecType rec_type,
-      bool is_rec_multi_round);
+      bool is_rec_multi_round,
+      const std::string& backend = "");
 
   ScheduleResult schedule_request(const absl::Duration& timeout);
 

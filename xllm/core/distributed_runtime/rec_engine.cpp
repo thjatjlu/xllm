@@ -93,12 +93,16 @@ bool RecEngine::init_model() {
   tokenizer_args_ = model_loader->tokenizer_args();
   // Determine rec model kind and create pipeline via factory
   rec_model_kind_ = get_rec_model_kind(args_.model_type());
-  CHECK(rec_model_kind_ != RecModelKind::kNone)
-      << "Unsupported rec model_type: " << args_.model_type();
-  auto pipeline_type = get_rec_pipeline_type(rec_model_kind_);
+  // GE graph mode is model-agnostic: skip model_kind check when backend=ge
+  if (options_.backend() != "ge") {
+    CHECK(rec_model_kind_ != RecModelKind::kNone)
+        << "Unsupported rec model_type: " << args_.model_type();
+  }
+  auto pipeline_type = get_rec_pipeline_type(rec_model_kind_, options_.backend());
   pipeline_ = create_pipeline(pipeline_type, *this);
-  // LlmRec-specific initialization
-  if (rec_model_kind_ == RecModelKind::kLlmRec) {
+  // LlmRec-specific initialization (skip for GE graph mode)
+  if (rec_model_kind_ == RecModelKind::kLlmRec &&
+      pipeline_type != RecPipelineType::kGeGraphPipeline) {
 #if defined(USE_NPU)
     FLAGS_enable_atb_comm_multiprocess =
         options_.enable_offline_inference() || (options_.nnodes() > 1);
@@ -1209,6 +1213,71 @@ RecEngine::RecMultiRoundEnginePipeline::get_active_activation_memory() const {
   return active_activation_memories;
 }
 
+#if defined(USE_TORCH_DELEGATE)
+// ============================================================
+// GeGraphEnginePipeline Implementation
+// ============================================================
+RecEngine::GeGraphEnginePipeline::GeGraphEnginePipeline(RecEngine& engine)
+    : OneRecLocalEnginePipeline(engine) {}
+
+int64_t RecEngine::GeGraphEnginePipeline::minimal_kv_cache_blocks() const {
+  return 1;
+}
+
+ForwardOutput RecEngine::GeGraphEnginePipeline::step(
+    std::vector<Batch>& batches) {
+  if (engine_.workers_.empty()) {
+    return {};
+  }
+
+  // Single forward: graph internally handles all decode + sampling + beam search
+  auto forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
+  const auto& output = get_model_output(forward_inputs);
+
+  // Process graph outputs (model-agnostic name -> tensor map)
+  if (!output.graph_outputs.empty()) {
+    batches[0].process_graph_outputs(output);
+  }
+
+  batches[0].finish();
+  return output;
+}
+
+ForwardOutput RecEngine::GeGraphEnginePipeline::get_model_output(
+    const ForwardInput& model_inputs) {
+  std::vector<folly::SemiFuture<std::optional<ForwardOutput>>> futures;
+  futures.reserve(engine_.workers_.size());
+  for (auto& worker : engine_.workers_) {
+    futures.emplace_back(worker->step_async(model_inputs));
+  }
+  auto results = folly::collectAll(futures).get();
+
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (results[i].hasException()) {
+      LOG(FATAL) << "Worker " << i
+                 << " failed with exception: " << results[i].exception().what();
+    }
+    CHECK(results[i].value().has_value())
+        << "Worker " << i << " failed to execute model and returned no output.";
+  }
+
+  auto forward_output = results.front().value();
+  CHECK(forward_output.has_value()) << "Failed to execute model";
+
+  auto& output = forward_output.value();
+
+  // D2H: transfer each graph_outputs tensor to CPU
+  for (auto& [name, tensor] : output.graph_outputs) {
+    if (tensor.defined() && tensor.numel() > 0) {
+      tensor = safe_to(tensor, torch::kCPU, /*non_blocking=*/true);
+    }
+  }
+
+  Device(engine_.workers_[0]->device()).synchronize_default_stream();
+  return output;
+}
+#endif  // USE_TORCH_DELEGATE
+
 // ============================================================
 // RecEngine pipeline factory (static method)
 // ============================================================
@@ -1224,6 +1293,10 @@ std::unique_ptr<RecEngine::RecEnginePipeline> RecEngine::create_pipeline(
       return std::make_unique<OneRecPrefillOnlyEnginePipeline>(engine);
     case RecPipelineType::kOneRecXAttentionPipeline:
       return std::make_unique<OneRecXAttentionEnginePipeline>(engine);
+#if defined(USE_TORCH_DELEGATE)
+    case RecPipelineType::kGeGraphPipeline:
+      return std::make_unique<GeGraphEnginePipeline>(engine);
+#endif
     default:
       LOG(FATAL) << "Unknown RecEngine pipeline type: "
                  << static_cast<int>(type);

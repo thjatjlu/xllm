@@ -492,6 +492,111 @@ RecMaster::OneRecXAttentionMasterPipeline::generate_request(
                                         /*build_stop_checker=*/true);
 }
 
+#if defined(USE_TORCH_DELEGATE)
+// ============================================================
+// process_epair_inputs: model-agnostic input validation for GE graph mode
+// ============================================================
+namespace {
+bool process_epair_inputs(
+    const std::optional<std::vector<int>>& prompt_tokens,
+    const std::optional<std::vector<proto::InferInputTensor>>& input_tensors,
+    std::vector<int32_t>* local_prompt_tokens,
+    MMData* processed_mm_data,
+    OutputCallback callback) {
+  if (prompt_tokens.has_value() && input_tensors.has_value()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "prompt_tokens and input_tensors cannot both be set");
+    return false;
+  }
+
+  if (prompt_tokens.has_value()) {
+    local_prompt_tokens->assign(prompt_tokens.value().begin(),
+                                prompt_tokens.value().end());
+  }
+
+  if (input_tensors.has_value()) {
+    if (input_tensors->empty()) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "input_tensors cannot be empty");
+      return false;
+    }
+
+    MMDict mm_dict;
+    mm_dict.reserve(input_tensors->size());
+
+    for (const auto& tensor : input_tensors.value()) {
+      const auto& name = tensor.name();
+
+      if (mm_dict.find(name) != mm_dict.end()) {
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                            "Duplicate input tensor: " + name);
+        return false;
+      }
+      if (!tensor.has_contents()) {
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                            "Input tensor '" + name + "' has no contents");
+        return false;
+      }
+      if (tensor.shape_size() < 1) {
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                            "Input tensor '" + name +
+                                "' must have at least 1-D shape");
+        return false;
+      }
+
+      try {
+        mm_dict[name] = util::convert_rec_tensor_to_torch(tensor);
+      } catch (const std::exception& e) {
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                            "Failed to parse input tensor '" + name +
+                                "': " + e.what());
+        return false;
+      }
+    }
+
+    *processed_mm_data = MMData(MMType::EMBEDDING, mm_dict);
+  }
+
+  if (local_prompt_tokens->empty() && !processed_mm_data->valid()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Requires prompt_tokens or input_tensors");
+    return false;
+  }
+
+  return true;
+}
+}  // anonymous namespace
+
+// ============================================================
+// GeGraphMasterPipeline Implementation
+// ============================================================
+std::shared_ptr<Request>
+RecMaster::GeGraphMasterPipeline::generate_request(
+    std::string prompt,
+    std::optional<std::vector<int>> prompt_tokens,
+    std::optional<std::vector<proto::InferInputTensor>> input_tensors,
+    const RequestParams& sp,
+    OutputCallback callback) {
+  std::vector<int32_t> local_prompt_tokens;
+  MMData processed_mm_data;
+
+  // Model-agnostic input validation
+  if (!process_epair_inputs(prompt_tokens, input_tensors,
+                            &local_prompt_tokens, &processed_mm_data,
+                            callback)) {
+    return nullptr;
+  }
+
+  // Build request without Host-side StoppingChecker (graph controls stopping)
+  return master_.build_request_common(std::move(prompt),
+                                      std::move(local_prompt_tokens),
+                                      std::move(processed_mm_data),
+                                      sp,
+                                      callback,
+                                      /*build_stop_checker=*/false);
+}
+#endif  // USE_TORCH_DELEGATE
+
 // ============================================================
 // RecMaster pipeline factory (static method)
 // ============================================================
@@ -508,6 +613,10 @@ std::unique_ptr<RecMaster::RecMasterPipeline> RecMaster::create_pipeline(
       return std::make_unique<OneRecPrefillOnlyMasterPipeline>(master);
     case RecPipelineType::kOneRecXAttentionPipeline:
       return std::make_unique<OneRecXAttentionMasterPipeline>(master);
+#if defined(USE_TORCH_DELEGATE)
+    case RecPipelineType::kGeGraphPipeline:
+      return std::make_unique<GeGraphMasterPipeline>(master);
+#endif
     default:
       LOG(FATAL) << "Unknown RecMaster pipeline type: "
                  << static_cast<int>(type);
@@ -523,6 +632,9 @@ RecMaster::RecMaster(const Options& options)
 
   model_args_ = engine_->model_args();
   rec_type_ = get_rec_type(model_args_);
+  if (options_.backend() == "ge") {
+    rec_type_ = RecType::kGeGraph;
+  }
   if (rec_type_ == RecType::kNone) {
     LOG(ERROR) << "Unsupported rec model_type: " << model_args_.model_type();
   }
@@ -551,7 +663,8 @@ RecMaster::RecMaster(const Options& options)
       .instance_role(options_.instance_role())
       .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
       .enable_service_routing(options_.enable_service_routing())
-      .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
+      .rec_worker_max_concurrency(options_.rec_worker_max_concurrency())
+      .backend(options_.backend());
   scheduler_ = create_fixed_steps_scheduler(engine_.get(), scheduler_options);
 
   chat_template_ = nullptr;
@@ -570,9 +683,12 @@ RecMaster::RecMaster(const Options& options)
 
   // Create pipelines based on rec_type
   auto rec_model_kind = get_rec_model_kind(model_args_.model_type());
-  CHECK(rec_model_kind != RecModelKind::kNone)
-      << "Unsupported rec model_type: " << model_args_.model_type();
-  auto pipeline_type = get_rec_pipeline_type(rec_model_kind);
+  // GE graph mode is model-agnostic: skip model_kind check when backend=ge
+  if (options_.backend() != "ge") {
+    CHECK(rec_model_kind != RecModelKind::kNone)
+        << "Unsupported rec model_type: " << model_args_.model_type();
+  }
+  auto pipeline_type = get_rec_pipeline_type(rec_model_kind, options_.backend());
   pipeline_ = create_pipeline(pipeline_type, *this);
 
   // For LlmRec, also create mm_data pipeline for raw input interface
@@ -616,8 +732,9 @@ void RecMaster::handle_request(
     std::optional<std::vector<proto::InferInputTensor>> input_tensors,
     RequestParams sp,
     OutputCallback callback) {
-  // This interface supports both OneRec and LlmRec (qwen3 without mm_data)
-  if (rec_type_ != RecType::kOneRec && rec_type_ != RecType::kLlmRec) {
+  // This interface supports OneRec, LlmRec, and GE graph mode
+  if (rec_type_ != RecType::kOneRec && rec_type_ != RecType::kLlmRec &&
+      rec_type_ != RecType::kGeGraph) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Unsupported rec type for this interface");
     return;

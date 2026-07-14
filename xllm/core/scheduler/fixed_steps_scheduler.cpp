@@ -85,9 +85,10 @@ void FixedStepsScheduler::handle_prefill_requests(
       scheduler_pipeline_ && scheduler_pipeline_->requires_kv_cache();
   while (!waiting_priority_queue_->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 &&
-         kv_cache_manager_->kv_cache_utilization() <
-             ::xllm::SchedulerConfig::get_instance()
-                 .prefill_scheduling_memory_usage_threshold()) {
+         (!requires_kv_cache ||
+          kv_cache_manager_->kv_cache_utilization() <
+              ::xllm::SchedulerConfig::get_instance()
+                  .prefill_scheduling_memory_usage_threshold())) {
     std::shared_ptr<Request> request(waiting_priority_queue_->top());
     if (request->finished() || request->cancelled()) {
       if (requires_kv_cache) {
@@ -248,7 +249,7 @@ std::vector<Batch> FixedStepsScheduler::prepare_batch() {
     bool is_rec_multi_round =
         (rec_type == RecType::kLlmRec) && is_rec_multi_round_mode();
     scheduler_pipeline_ =
-        create_scheduler_pipeline(rec_type, is_rec_multi_round);
+        create_scheduler_pipeline(rec_type, is_rec_multi_round, options_.backend());
   }
 
   // remaining budget for the current batch
@@ -478,7 +479,17 @@ FixedStepsScheduler::RecMultiRoundSchedulerPipeline::create_batches(
 
 std::unique_ptr<FixedStepsScheduler::SchedulerPipeline>
 FixedStepsScheduler::create_scheduler_pipeline(RecType rec_type,
-                                               bool is_rec_multi_round) {
+                                               bool is_rec_multi_round,
+                                               const std::string& backend) {
+  if (backend == "ge") {
+#if defined(USE_TORCH_DELEGATE)
+    return std::make_unique<GeGraphSchedulerPipeline>();
+#else
+    LOG(FATAL) << "GE graph backend requested but USE_TORCH_DELEGATE is not "
+                  "enabled at compile time";
+    return nullptr;
+#endif
+  }
   if (is_rec_multi_round) {
     return std::make_unique<RecMultiRoundSchedulerPipeline>();
   }
@@ -490,5 +501,18 @@ FixedStepsScheduler::create_scheduler_pipeline(RecType rec_type,
   }
   return std::make_unique<OneRecSchedulerPipeline>();
 }
+
+#if defined(USE_TORCH_DELEGATE)
+std::vector<Batch>
+FixedStepsScheduler::GeGraphSchedulerPipeline::create_batches(
+    FixedStepsScheduler& scheduler,
+    BatchFactory* batch_factory) {
+  return batch_factory->create_rec_batches(
+      scheduler.running_requests_,
+      scheduler.running_sequences_,
+      scheduler.running_sequences_budgets_,
+      scheduler.kv_cache_manager_->get_swap_block_transfer_infos());
+}
+#endif  // USE_TORCH_DELEGATE
 
 }  // namespace xllm

@@ -47,6 +47,9 @@ limitations under the License.
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "platform/npu/device_capture_lock.h"
 #endif
+#if defined(USE_TORCH_DELEGATE)
+#include "framework/model/ep_model.h"
+#endif
 #include "common/version_singleton.h"
 #include "framework/model_loader.h"
 #include "framework/sampling/rec_constrained_decoding.h"
@@ -2993,11 +2996,14 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
   // Determine rec model kind and pipeline type
   const auto& model_type = context.get_model_args().model_type();
   rec_model_kind_ = get_rec_model_kind(model_type);
-  CHECK(rec_model_kind_ != RecModelKind::kNone)
-      << "Unsupported rec model_type: " << model_type;
+  // GE graph mode is model-agnostic: skip model_kind check when backend=ge
+  if (options_.backend() != "ge") {
+    CHECK(rec_model_kind_ != RecModelKind::kNone)
+        << "Unsupported rec model_type: " << model_type;
+  }
 
   // Create concurrent pipeline (not base class pipeline)
-  auto pipeline_type = get_rec_pipeline_type(rec_model_kind_);
+  auto pipeline_type = get_rec_pipeline_type(rec_model_kind_, options_.backend());
 
   // Reserve space for model instances
   work_pipelines_.reserve(options_.rec_worker_max_concurrency());
@@ -3013,6 +3019,13 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
                                        context.get_quant_args(),
                                        context.get_tensor_options());
 
+#if defined(USE_TORCH_DELEGATE)
+    if (pipeline_type == RecPipelineType::kGeGraphPipeline) {
+      // GE graph mode: create EpModel
+      runtime.model = std::make_unique<EpModel>(
+          runtime.context->get_tensor_options());
+    } else
+#endif
     if (rec_model_kind_ == RecModelKind::kOneRec) {
       runtime.model = create_rec_model(*runtime.context.get());
     } else {
@@ -3183,6 +3196,63 @@ folly::SemiFuture<std::optional<ForwardOutput>> RecWorkerImpl::step_async(
   return future;
 }
 
+#if defined(USE_TORCH_DELEGATE)
+// ============================================================
+// GeGraphWorkerPipeline Implementation
+// ============================================================
+
+ForwardInput RecWorkerImpl::GeGraphWorkerPipeline::prepare_inputs(Batch& batch) {
+  MPMCThreadPool* thread_pool =
+      runtime_.worker.input_builder_thread_pool_
+          ? runtime_.worker.input_builder_thread_pool_.get()
+          : nullptr;
+
+  return batch.prepare_rec_forward_input(
+      runtime_.worker.options_.num_decoding_tokens(),
+      /*min_decoding_batch_size=*/0,
+      runtime_.context->get_model_args(),
+      thread_pool);
+}
+
+void RecWorkerImpl::GeGraphWorkerPipeline::prepare_work_before_execute(
+    const ForwardInput& inputs,
+    ForwardInput& processed_inputs) {
+  // Reuse base logic: H2D transfer + KV block swap
+  RecWorkPipeline::prepare_work_before_execute(inputs, processed_inputs);
+  // No additional preparation needed: EpModel handles input mapping internally
+}
+
+std::optional<ForwardOutput> RecWorkerImpl::GeGraphWorkerPipeline::step(
+    const ForwardInput& input) {
+  runtime_.worker.device_.set_device();
+
+  auto& mutable_input = const_cast<ForwardInput&>(input);
+
+  // Single forward: graph internally handles all decode + sampling + beam search
+  auto model_output = runtime_.executor->forward(mutable_input.token_ids,
+                                                  mutable_input.positions,
+                                                  runtime_.worker.kv_caches_,
+                                                  mutable_input.input_params);
+
+  // Non-driver workers: synchronize and return nullopt
+  if (!runtime_.worker.driver_ && !runtime_.worker.dp_driver_) {
+    runtime_.stream->synchronize();
+    return std::nullopt;
+  }
+
+  // Driver: transparently pass through graph_outputs
+  ForwardOutput output;
+  output.graph_outputs = std::move(model_output.graph_outputs);
+
+  output.do_sample = mutable_input.sampling_params.do_sample;
+  output.logprobs = mutable_input.sampling_params.logprobs;
+  output.max_top_logprobs = mutable_input.sampling_params.max_top_logprobs;
+
+  runtime_.stream->synchronize();
+  return output;
+}
+#endif  // USE_TORCH_DELEGATE
+
 // ============================================================
 // RecWorkerImpl pipeline factory (static method)
 // ============================================================
@@ -3199,6 +3269,10 @@ std::unique_ptr<RecWorkerImpl::RecWorkPipeline> RecWorkerImpl::create_pipeline(
       return std::make_unique<LlmRecMultiRoundPipeline>(runtime);
     case RecPipelineType::kOneRecXAttentionPipeline:
       return std::make_unique<OneRecXAttentionWorkPipeline>(runtime);
+#if defined(USE_TORCH_DELEGATE)
+    case RecPipelineType::kGeGraphPipeline:
+      return std::make_unique<GeGraphWorkerPipeline>(runtime);
+#endif
     default:
       LOG(FATAL) << "Unknown RecWorkerImpl pipeline type: "
                  << static_cast<int>(type);

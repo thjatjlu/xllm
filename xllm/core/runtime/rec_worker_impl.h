@@ -368,6 +368,26 @@ class RecWorkerImpl : public LLMWorkerImpl {
     int32_t beam_width_;
   };
 
+#if defined(USE_TORCH_DELEGATE)
+  // ============================================================
+  // GeGraphWorkerPipeline: kGeGraphPipeline via EpModel
+  // torch-delegate GE graph mode: single forward() per step,
+  // graph internally handles sampling + beam search + decode.
+  // ============================================================
+  class GeGraphWorkerPipeline final : public RecWorkPipeline {
+   public:
+    explicit GeGraphWorkerPipeline(RecPipelineRuntime& runtime)
+        : RecWorkPipeline(runtime) {}
+
+    ForwardInput prepare_inputs(Batch& batch) override;
+
+    void prepare_work_before_execute(const ForwardInput& inputs,
+                                     ForwardInput& processed_inputs) override;
+
+    std::optional<ForwardOutput> step(const ForwardInput& input) override;
+  };
+#endif
+
   // Factory method to create pipeline (can access private classes)
   static std::unique_ptr<RecWorkPipeline> create_pipeline(
       RecPipelineType type,

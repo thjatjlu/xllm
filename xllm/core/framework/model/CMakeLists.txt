@@ -10,7 +10,9 @@ cc_library(
     dit_model.h
     model_args.h
     model_input_params.h
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:ep_model.h>
   SRCS
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:ep_model.cpp>
   DEPS
     :common
     :common_layers
@@ -22,4 +24,5 @@ cc_library(
     torch
     torch_python
     $<$<BOOL:${USE_NPU}>:platform_npu>
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:TorchDelegate::torch_delegate_backend>
 )

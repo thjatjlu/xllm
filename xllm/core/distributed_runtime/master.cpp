@@ -119,7 +119,7 @@ void validate_rank_tablefile_backend() {
 
 void resolve_npu_kernel_backend_for_options(Options* options) {
   CHECK(options != nullptr) << "options must not be null";
-  if (options->backend() == "dit") {
+  if (options->backend() == "dit" || options->backend() == "ge") {
     return;
   }
 
@@ -492,6 +492,14 @@ std::unique_ptr<Master> create_master(const std::string& backend,
   } else if (backend == "rec") {
     LOG(INFO) << "creating rec master";
     return std::make_unique<RecMaster>(options);
+#if defined(USE_TORCH_DELEGATE)
+  } else if (backend == "ge") {
+    // TODO: Currently "ge" backend is bound to RecMaster for Rec models only.
+    // Future: decouple backend (master type) from engine (atb/ge) via a
+    // separate --engine flag so that LLM/VLM can also use GE graph mode.
+    LOG(INFO) << "creating rec master (ge graph mode)";
+    return std::make_unique<RecMaster>(options);
+#endif
   } else {
     LOG(FATAL) << "Failed to create master, backend is" << backend;
     return nullptr;

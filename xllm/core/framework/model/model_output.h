@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <optional>
+#include <unordered_map>
 
 namespace xllm {
 struct ModelOutput {
@@ -28,6 +29,10 @@ struct ModelOutput {
   torch::Tensor residual;
   // [num_tokens, ...]
   torch::Tensor aux_hidden_states;
+
+  // GE graph mode: model-agnostic output (name -> tensor)
+  // Keys and semantics are entirely determined by the epair graph.
+  std::unordered_map<std::string, torch::Tensor> graph_outputs;
 
   ModelOutput() = default;
 

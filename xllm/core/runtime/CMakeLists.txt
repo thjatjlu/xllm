@@ -18,6 +18,7 @@ cc_library(
     dit_executor.h
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:ge_graph_executor_impl.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
@@ -48,6 +49,7 @@ cc_library(
     dit_executor.cpp
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.cpp>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:ge_graph_executor_impl.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
@@ -95,6 +97,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_ops>
     $<$<BOOL:${USE_NPU}>:atb_customize>
     $<$<BOOL:${USE_NPU}>:platform_npu>
+    $<$<BOOL:${USE_TORCH_DELEGATE}>:TorchDelegate::torch_delegate_backend>
     :eplb
     glog::glog
     Folly::folly
